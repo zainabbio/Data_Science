@@ -1,0 +1,67 @@
+library(tidyverse)
+data(DNase)
+class(DNase)
+# [1] "nfnGroupedData" "nfGroupedData"  "groupedData"    "data.frame"
+# We say that a DNase is in tidy format as each row represents one observation and columns represent the different variables 
+# available for each of these observations. That is why DNase dataset is an example of a tidy data frame.
+
+# (1) Show the names of variables present
+names(DNase)
+# [1] "Run"     "conc"    "density"
+
+# (2) subsetting
+sub = filter(DNase, Run == "1" | Run == "4" | Run == "6")
+sub
+
+# (3) Adding replicate column to DNase and assigning replication numbers
+
+DN = DNase %>% mutate(replicate = rep(c(1,2),88))
+DN
+
+# (4) repeat step 2 and 3
+sub2 = filter(DN, Run == "1" | Run == "4" | Run == "6")
+sub2
+
+DN = DN %>% mutate(replicate2 = rep(c(1,2),88))
+DN
+
+# (5) Create a grouped tibble from the data.frame created in step 4 that is grouped by the concentration
+df <- as_tibble(DN)
+df %>% group_by_at(vars(conc))
+
+# Summarize the mean of the density per concentration
+dens1 <- df %>% group_by(conc) %>% summarise(mean_density = mean(density))
+dens1
+# A tibble: 8 x 2
+     conc mean_density
+    <dbl>        <dbl>
+1  0.0488       0.0533
+2  0.195        0.151 
+3  0.391        0.240 
+4  0.781        0.407 
+5  1.56         0.666 
+6  3.12         1.04  
+7  6.25         1.43  
+8 12.5          1.77
+
+# Summarize the standard deviation of the density per concentration
+dens2 <- df %>% group_by(conc) %>% summarise(sd_density = sd(density))
+dens2
+# A tibble: 8 x 2
+     conc sd_density
+    <dbl>      <dbl>
+1  0.0488     0.0276
+2  0.195      0.0243
+3  0.391      0.0263
+4  0.781      0.0276
+5  1.56       0.0306
+6  3.12       0.0379
+7  6.25       0.0692
+8 12.5        0.0846
+
+ndf = df %>%
+  mutate(conc_bin = case_when(conc < 1 ~ 'c<1',
+                              conc > 1 | conc < 5 ~ '1<c<5',
+                              conc > 5 ~ 'c>5'))
+
+as.data.frame(ndf)
