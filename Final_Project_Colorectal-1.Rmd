@@ -1,0 +1,789 @@
+---
+title: "Final project"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Hypothesis: "Machine Learning can efficiently differentiate and classify normal and tumor sample based on transcriptomic profile".
+# Data Science Project
+## First, we will install all the required packages and then we will load the libraries.
+## To query, we will prepare and download data from the TCGA portal
+
+## To download TCGA data with TCGAbiolinks, you need to follow 3 steps. 
+## First, you query the TCGA database through R with the function GDCquery.
+## This will allow you to investigate the data available at the TCGA database. 
+## Next, we use GDCdownload to download raw version of desired files into 
+## your computer. 
+## Finally GDCprepare will read these files and make R data structures 
+## so that we can further analyse them.
+
+```{r packages, eval= FALSE, warning= FALSE, include=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("SummarizedExperiment")
+BiocManager::install("TCGAbiolinksGUI.data")
+BiocManager::install("BioinformaticsFMRP/TCGAbiolinks")
+BiocManager::install("edgeR")
+BiocManager::install("remote")
+BiocManager::install("FactoMineR")
+BiocManager::install("remotes")
+install.packages("enrichplot")
+install.packages("enrichR")
+```
+#Here we upload all the necessary libraries
+```{r}
+library("TCGAbiolinks", quietly = T)
+library("SummarizedExperiment", quietly = T)
+library("edgeR")
+library("caret", quietly = T)
+library(survival)
+library(dplyr)
+library(plyr)
+library(tidyr)
+library(tidyverse)
+library(corrplot)
+library(matrixStats)
+library(gprofiler2)
+library(limma)
+library(survminer)
+library(genefilter)
+library(glmnet)
+library(factoextra)
+library(FactoMineR)
+library(gplots)
+library(RColorBrewer)
+library("remote")
+library("remotes")
+library(enrichR)
+```
+## First, we checked all the available projects at TCGA 
+```{r}
+GDCprojects = getGDCprojects()
+
+head(GDCprojects[c("project_id", "name")])
+
+View(GDCprojects[c("project_id", "name")])
+```
+
+## Here we are using Colon Adenocarcinoma dataset, identified in TCGA as COAD
+# get details on all data deposited for TCGA-COAD.
+```{r}
+TCGAbiolinks:::getProjectSummary("TCGA-COAD")
+```
+
+## Querying all Transcriptome profiling data from COAD project
+```{r}
+coad_TCGA = GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling")
+```
+
+# Now we visualized the results
+View(getResults(coad_TCGA))
+
+## querying all RNA-seq data from COAD project
+coad_TCGA = GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts")
+
+# So, here we visualized the query results in a more readable way
+# Now get tissue type measured at an experiment (solid tissue normal, primary solid tissue and cell line).
+# This information is present at column “sample_type”.
+
+```{r}
+print(coad_res$sample_type)
+coad_res = getResults(coad_TCGA) # make results as table
+head(coad_res) # data of the first 6 patients.
+View(getResults(coad_TCGA))
+colnames(coad_res) # columns present in the table
+```
+
+# convert sample_type to factor and summarise using summary or table
+```{r}
+table(factor(coad_res$sample_type))
+```
+
+# there are 41 controls (Solid Tissue Normal) and 481 cancer samples (Primary Tumors). We found 1  metastatic and 1 reccurent tumor in our sample.For simplicity, we will ignore the small class of recurrent solid tumors.
+# Therefore, we redo the query to check the sample_types again.
+
+```{r}
+coad_TCGA = GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+  data.type = "Gene Expression Quantification")
+```
+
+
+# Now we visualized the query results in a more readable way
+# Here, we converted sample_type to factor and summarise the sample types using summary() or table()
+
+```{r}
+coad_res = getResults(coad_TCGA) # make results as table
+head(coad_res) # data of the first 6 patients
+table(factor(coad_res$sample_type))
+```
+
+
+### Now we downloaded the files from the query
+# first we set the directory to download the data
+#getwd()
+#setwd("/Users/gtb/zainab/Colorectal/")
+
+# download the files specified in the query.
+
+#GDCdownload(query = coad_TCGA) # rerun if download fails
+
+### Now we prepared the downloaded data and other associated data into an object
+## We uploaded the actual RNASeq data into R
+## both clinical and expression data will be present in this object
+
+```{r}
+coad_data = GDCprepare(coad_TCGA) 
+View(coad_data)
+dim(coad_data)
+str(coad_data)
+length(coad_data)
+colnames(colData(coad_data))
+table(coad_data@colData$vital_status)
+table(coad_data@colData$tumor_grade)
+table(coad_data@colData$definition)
+table(coad_data@colData$tissue_or_organ_of_origin)
+table(coad_data@colData$gender)
+table(coad_data@colData$race)
+table(coad_data@colData$sample_type)
+table(coad_data@colData$ajcc_pathologic_stage)
+table(coad_data@colData$paper_tumor_stage)
+(coad_data@colData$definition)
+```
+
+ 
+#Subsetting The Data
+## As the the dataset is so huge (length=60660, dimesnion include 552 columns and 60660 rows) and machine learning take a lot of time to process the data, so here we subsetted the query to 82 samples including 41 primary tumor and 41 normal tumor to proceed with it:
+
+
+```{r}
+Pri<- coad_data@colData$sample_type == "Primary Tumor"
+sum(Pri)
+Subset_Pri<- coad_data$barcode[Pri]
+Colon1 <- Subset_Pri[1:82]
+
+Nor<-coad_data@colData$sample_type == "Solid Tissue Normal"
+sum(Nor)
+Subset_Nor<- coad_data$barcode[Nor]
+Colon2<- Subset_Nor[1:41]
+Com <- c(Colon1,Colon2)
+View(Com)
+
+coad1_TCGA <- GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+  barcode = Com )
+
+coad1_res = getResults(coad1_TCGA) 
+View(getResults(coad1_TCGA))
+
+GDCdownload(query = coad1_TCGA)
+coad2_data <- GDCprepare(query = coad1_TCGA,
+                        save = TRUE,
+                        save.filename = "coad1_data.rda" ,
+                        summarizedExperiment = TRUE)
+coad2_data <- readRDS("~/zainab/Colorectal/coad2_data.RDS")
+View(coad2_data)
+colnames(colData(coad2_data))
+table(coad2_data@colData$vital_status)
+table(coad2_data@colData$tumor_grade)
+table(coad2_data@colData$definition)
+table(coad2_data@colData$tissue_or_organ_of_origin)
+table(coad2_data@colData$gender)
+table(coad2_data@colData$race)
+table(coad2_data@colData$sample_type)
+table(coad2_data@colData$ajcc_pathologic_stage)
+```
+
+# So here, we checked the dimensions and head of subsetted RNAseq data
+
+```{r}
+dim(assay(coad2_data))     # gene expression matrices.
+head(assay(coad2_data)[,1:10]) # expression of first 6 genes and first 10 samples
+head(rowData(coad2_data))     # ensembl id and gene id of the first 6 genes.
+```
+
+
+# Save the data as a file, if you need it later, you can just load this file
+# instead of having to run the whole pipeline again
+
+```{r}
+saveRDS(object = coad2_data,
+        file = "coad2_data.RDS",
+        compress = FALSE)
+```
+
+## Later it can be retrieved
+# We uploaded this data by using following command, as the GDC was under maintenance;
+#To generate an overall survival curve
+```{r}
+clinical = coad2_data@colData
+colnames(clinical)
+table(factor(clinical$paper_tumor_stage)) 
+coad_clin_df = clinical[c("definition",
+                      "patient",
+                      "vital_status",
+                      "days_to_death",
+                      "days_to_last_follow_up",
+                      "paper_tumor_stage")]
+coad_clin_df$deceased = coad_clin_df$vital_status == "Dead"
+coad_clin_df$overall_survival = ifelse(coad_clin_df$deceased,
+                                   coad_clin_df$days_to_death,
+                                   coad_clin_df$days_to_last_follow_up)
+fit_overall = survfit(Surv(overall_survival, deceased) ~ 1, data=coad_clin_df)
+ggsurvplot(fit_overall, data=coad_clin_df, pval=T, risk.table=T, risk.table.col="strata", palette = c("#2E9FDF"))
+```
+
+#To generate tumor-stage specific survival surve:
+```{r}
+coad_clin_df$paper_tumor_stage = gsub("[abc]$", "", clinical$paper_tumor_stage)
+coad_clin_df[which(clinical$paper_tumor_stage == "NA"), "paper_tumor_stage"] = NA
+table(coad_clin_df$paper_tumor_stage)
+
+```
+
+# read_data = readRDS(file = "read_data.RDS")
+#Survival Analysis
+
+```{r}
+coad2_clinical = coad2_data@colData
+colnames(coad2_clinical)
+table(factor(coad2_clinical$paper_tumor_stage)) 
+
+coad2_df = coad2_clinical[c("definition",
+                          "patient",
+                          "vital_status",
+                          "days_to_death",
+                          "days_to_last_follow_up",
+                          "paper_tumor_stage")]
+
+coad2_df$deceased = coad2_df$vital_status == "Dead"
+
+coad2_df$overall_survival = ifelse(coad2_df$deceased,
+                                  coad2_df$days_to_death,
+                                  coad2_df$days_to_last_follow_up)
+```
+
+
+##### RNAseq analysis #########
+## Here we createed a pipeline function for running limma. 
+#The function is known as limma_pipeline(coad2_data, condition_variable, reference_group), 
+# where coad2_data is the data object we got from TCGA and 
+# condition_variable is the interesting variable/condition by which 
+# we want to group the patient samples. 
+# You can also decide which one of the values of your conditional variable 
+# is going to be the reference group, with the reference_group parameter.
+
+
+```{r}
+limma_pipeline = function(
+    coad2_data,
+    condition_variable,
+    reference_group=NULL){
+  
+  design_factor = colData(coad2_data)[, condition_variable, drop=T]
+  
+  group = factor(design_factor)
+  if(!is.null(reference_group)){group = relevel(group, ref=reference_group)}
+  
+  design = model.matrix(~ group)
+  
+  dge = DGEList(counts=assay(coad2_data),
+                samples=colData(coad2_data),
+                genes=as.data.frame(rowData(coad2_data)))
+  
+  # filtering
+  keep = filterByExpr(dge,design)
+  dge = dge[keep,,keep.lib.sizes=FALSE]
+  rm(keep)
+  
+  # Normalization (TMM followed by voom)
+  dge = calcNormFactors(dge)
+  v = voom(dge, design, plot=TRUE)
+  
+  # Fit model to data given design
+  fit = lmFit(v, design)
+  fit = eBayes(fit)
+  
+  # Show top genes
+  topGenes = topTable(fit, coef=ncol(design), number=50, sort.by="p")
+  
+  return(
+    list(
+      voomObj=v, # normalized data
+      fit=fit, # fitted model and statistics
+      topGenes=topGenes # the 50 most differentially expressed genes
+    )
+  )
+}
+```
+
+############
+##
+# This function returns a list with three different objects:
+# A complex object, resulting from running voom, this contains the TMM+voom normalized data;
+# A complex object, resulting from running eBayes, this contains the the fitted 
+# model plus a number of statistics related to each of the probes;
+# A simple table, resulting from running topTable, which contains the top 50
+# differentially expressed genes sorted by p-value.
+
+################################
+
+## Differential expression analysis
+# DE analysis comparing Primary solid Tumor samples against Solid Tissue Normal
+
+```{r}
+limma_res = limma_pipeline(
+  coad2_data=coad2_data,
+  condition_variable="definition",
+  reference_group="Solid Tissue Normal"
+  )
+View(limma_res)
+```
+
+
+# Now, we saved the data as a file, we you just load this file later
+# instead of having to run the whole pipeline again
+```{r}
+saveRDS(object = limma_res,
+        file = "limma_res.RDS",
+        compress = FALSE)
+```
+
+
+#Now we performed principal component analysis (PCA) to see the distrubution and discrimation of the data.
+```{r}
+limma_res <- readRDS("~gtb/zainab/Colorectal/limma_res.RDS")
+View(limma_res)
+PCA_COAD1 = function(voomObj, condition_variable){
+  group = factor(voomObj$targets[, condition_variable])
+  pca = prcomp(t(voomObj$E))
+  # Take PC1 and PC2 for the plot
+  plot(pca$x[,1:2],col=group, pch=19)
+  # include a legend for points
+  legend("topleft", inset=.001, levels(group), pch=19, col=1:length(levels(group)))
+  return(pca)
+}
+```
+
+#PCA plot based on different features in the colData
+```{r}
+COAD_pca_def = PCA_COAD1(limma_res$voomObj, "definition")
+COAD_pca_gen = PCA_COAD1(limma_res$voomObj, "gender")
+COAD_pca_dia = PCA_COAD1(limma_res$voomObj, "primary_diagnosis")
+COAD_pca_tre = PCA_COAD1(limma_res$voomObj, "prior_treatment")
+COAD_pca_eth = PCA_COAD1(limma_res$voomObj, "ethnicity")
+COAD_pca_vit = PCA_COAD1(limma_res$voomObj, "vital_status")
+COAD_pca_stage = PCA_COAD1(limma_res$voomObj, "paper_tumor_stage")
+```
+
+#As from these plot, we saw that the data are not mixed.
+# Moreover, we saw that in case of sample types the data are labelled and not mixed, so we used sample types for further analyzing the cancer data,and here we are using all the supervised machine learning models for classification purpose. 
+
+#Using Machine Learning Models for Classification purpose
+#First we will preprocess our data and divides the data into two different groups, training and testing data.
+#
+```{r}
+Col_mat = as.matrix(t(limma_res$voomObj$E)) #this will be the x data
+print(dim(Col_mat))
+```
+
+# retain only a small subset of the genes
+```{r}
+Col_mat = varFilter(limma_res$voomObj$E, var.func=IQR, var.cutoff=0.95)
+Col_mat = t(Col_mat)
+print(dim(Col_mat))
+```
+
+# Convert the definition into a factor
+```{r}
+Col_resp = as.factor(limma_res$voomObj$targets$definition) #this will be the y data
+```
+
+# Transpose and make it into a matrix object
+
+```{r}
+Col_mat = as.matrix(t(limma_res$voomObj$E))
+```
+
+# Convert the definition into a factor
+```{r}
+Col_resp = as.factor(limma_res$voomObj$targets$definition)
+table(Col_resp)
+```
+
+### Split the data into two different sets: 1) train sets, 2) test sets
+# Divide data into training and testing set
+# Set (random-number-generator) seed so that results are consistent between runs
+# Here, we divide the data into train and test sets, where 75% of our data was used as training, and the remaining 25% was considered as testing;
+
+```{r}
+set.seed(42)
+train_coad = createDataPartition(Col_resp, p=0.75, list=FALSE)
+
+x_train_coad = Col_mat[train_coad, ]
+x_test_coad  = Col_mat[-train_coad, ]
+
+y_train_coad = Col_resp[train_coad]
+y_test_coad  = Col_resp[-train_coad]
+```
+
+#Data proportion Table
+```{r}
+prop.table(table(y_train_coad))
+prop.table(table(y_test_coad))
+```
+
+#So in our datasets, we have 66% primary solid tumor and 33% normal tissue, now we can apply the machine learning model on this datasets.
+
+#First, we checked all the available models for our trained data:
+```{r}
+names(getModelInfo())
+
+```
+
+### MACHINE LEARNING MODELS:
+# 1) Elastic Net Model: This is a generalized linear model that combines the best of two other models that is LASSO and Ridge Regression.
+# First we train model on training dataset using cross-validation
+```{r}
+Enet_res_coad = cv.glmnet(
+  x = x_train_coad,
+  y = y_train_coad,
+  alpha = 0.5,
+  family = "binomial"
+)
+```
+
+## Model evaluation
+## validate using test set
+
+```{r}
+y_pred_coad = predict(Enet_res_coad, newx=x_test_coad, type="class", s="lambda.min")
+```
+
+# performance
+
+```{r}
+Enet_confusion_matrix = table(y_pred_coad, y_test_coad)
+```
+
+# Evaluation statistics
+```{r}
+print(Enet_confusion_matrix)
+print(paste0("Sensitivity: ",sensitivity(Enet_confusion_matrix)))
+print(paste0("Specificity: ",specificity(Enet_confusion_matrix)))
+print(paste0("Precision: ",precision(Enet_confusion_matrix)))
+print(paste0("kappa: ",kappa(Enet_confusion_matrix)))
+print(paste0("negPredValue: ",negPredValue(Enet_confusion_matrix)))
+print(paste0("posPredValue: ",posPredValue(Enet_confusion_matrix)))
+```
+
+# 2) RF (random forest)
+#Now, we used RF (random forest) Model with default parameters
+```{r}
+set.seed(9, sample.kind = "Rounding")
+RF_tuning <- data.frame(mtry=c(3,5,7,9))
+RF_trained <- train(x_train_coad,y_train_coad, method="rf",tuneGrid = RF_tuning, importance = TRUE)
+RF_trained$bestTune
+trellis.par.set(caretTheme())
+plot(RF_trained, col = c("red", "blue"))
+RF_pred <- predict(RF_trained, x_test_coad)
+confusionMatrix(RF_pred, y_test_coad)
+mean(RF_pred == y_test_coad)
+```
+
+# 3) KNN (K-nearest neighors)
+#Now, we used KNN (K-nearest neighors) with default parameters
+```{r}
+set.seed(7, sample.kind = "Rounding")
+KNN_trained <- train(x_train_coad,y_train_coad,method="knn")
+ggplot(KNN_trained, highlight = T)
+```
+
+# Specify explicitly the number of bootstrapping for resampling
+```{r}
+coad_train_control <- trainControl(method = "boot", number = 100)
+Knn_trained <- train(x_train_coad,y_train_coad,method="knn", trControl = coad_train_control)
+ggplot(Knn_trained, highlight = T)
+```
+
+# Here, we set the number of neighbors 
+
+```{r}
+set.seed(7, sample.kind = "Rounding")
+Knn_tuning <- data.frame(k=seq(5,7,9))
+trained_knn <- train(x_train_coad,y_train_coad,method="knn",tuneGrid = Knn_tuning)
+```
+
+# Find the parameter that maximized the accuracy of the model
+```{r}
+trained_knn$bestTune
+```
+
+# Which is the best performing model
+```{r}
+trained_knn$finalModel
+```
+
+# Here, we changed the default resampling method of bootstrapping to 10-fold cross-validation
+```{r}
+knn_tc <- trainControl(method = "cv", number = 10)
+trained_knn_cv <- train(x_train_coad,y_train_coad,method="knn", trControl = knn_tc)
+ggplot(trained_knn_cv, highlight = T)
+```
+
+# We predicted the held-out test dataset with the trained model
+```{r}
+knn_preds <- predict(trained_knn,x_test_coad)
+knn_preds_cv <- predict(trained_knn_cv,x_test_coad)
+```
+
+# Now we checked the performance of the model on the test data.
+```{r}
+confusionMatrix(knn_preds, y_test_coad)
+confusionMatrix(knn_preds_cv, y_test_coad)
+```
+
+# 4) Hpertuned KNN
+```{r}
+H_Knn_tc <- trainControl(method = "boot", number = 50)
+Hy_trained_knn <- train(x_train_coad,y_train_coad,method="knn", trControl = H_Knn_tc)
+ggplot(Hy_trained_knn, highlight = T)
+H_knn_preds <- predict(Hy_trained_knn,x_test_coad)
+confusionMatrix(H_knn_preds, y_test_coad)
+mean(H_knn_preds== y_test_coad)
+CV_HKnn_cv <- trainControl(method = "cv", number = 10)
+H_trained_knn_cv <- train(x_train_coad,y_train_coad,method="knn", trControl = CV_HKnn_cv)
+ggplot(H_trained_knn_cv, highlight = T)
+H_knn_preds_cv <- predict(H_trained_knn_cv,x_test_coad)
+confusionMatrix(H_knn_preds_cv, y_test_coad)
+mean(H_knn_preds_cv== y_test_coad)
+```
+
+# 5) Support Vector Machine
+```{r}
+SVM_trained <- train(x_train_coad,y_train_coad,method="svmLinear")
+SVM_trained$bestTune
+SVM_preds <- predict(SVM_trained,x_test_coad)
+mean(SVM_preds==y_test_coad)
+confusionMatrix(SVM_preds, y_test_coad)
+```
+
+# 6) Bernoulli Naive Bayes (NB)
+```{r}
+trained_nb <- train(x_train_coad, y_train_coad, method = "nb")
+nb_preds <- predict(trained_nb, x_test_coad)
+mean(nb_preds == y_test_coad)
+confusionMatrix(nb_preds, y_test_coad)
+```
+
+# Here, we compared the accuracy of all the models that we used for our data classification.
+```{r}
+models <- c("Elastic net", "Support Vector Machine", "Navies Bayes", "K-nearest neighbors", "KNN-CV", "Hypertuned KNN", "Hypertuned KNN CV", "Random forest")
+accuracy <- c(mean(y_pred_coad== y_test_coad),
+              mean(SVM_preds==y_test_coad),
+              mean(nb_preds == y_test_coad),
+              mean(knn_preds == y_test_coad),
+              mean(knn_preds_cv== y_test_coad),
+              mean(H_knn_preds == y_test_coad),
+              mean(H_knn_preds_cv == y_test_coad),
+              mean(RF_pred == y_test_coad))
+comparsions = data.frame(ML_Models = models, Accuracy = accuracy)
+comparsions
+colors <- c("red", "green", "blue", "orange", "purple", "cyan", "yellow", "pink")
+ggplot(data = comparsions, aes(x = ML_Models, y = Accuracy, fill = ML_Models)) +
+ geom_bar(stat = "identity") +
+geom_text(aes(label = paste0(round(Accuracy*100, 1), "%")), vjust = 2) +
+ggtitle("Machine Learning Models Accuracy Comparison Plot") +
+xlab("ML_Models") +
+ylab("Accuracy") +
+scale_fill_manual(values = colors) +
+labs(fill = "") +
+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 12),
+axis.text.y = element_text(size = 12),
+axis.title = element_text(size = 14))
+
+```
+#In this plot, you can see that the accuarcy of all the used models was 100% except Navies Bayes (96.7)%.
+#Now we identified the differentially expressed genes
+```{r}
+res_coef_coad = coef(Enet_res_coad, s="lambda.min")
+dim(res_coef_coad)
+head(res_coef_coad)
+res_coef_coad = res_coef_coad[res_coef_coad[,1] != 0,]
+head(res_coef_coad)
+res_coef_coad = res_coef_coad[-1]
+relevant_genes = names(res_coef_coad)
+length(relevant_genes)
+relevant_gene_names = limma_res$voomObj$genes[relevant_genes,"gene_name"]
+relevant_gene_names
+```
+#So, in our data we found 140 relevant genes
+# Now we find same genes in limma and Elastic Net
+```{r}
+print(intersect(limma_res$topGenes$gene_id, relevant_genes))
+```
+#So we obserbed that 33 genes were similar in both limma and elastic net.
+#Now we did enrichment analysis and found various pathways for enrich genes genes in tumor and normal samples
+```{r}
+path_coad <- gost(query = relevant_gene_names, organism = "hsapiens", significant = TRUE)
+head(path_coad$result)
+gostplot(path_coad)
+hmcol = colorRampPalette(rev(brewer.pal(9, "RdBu")))(256)
+clust = function(x) hclust(x, method="complete")
+dist = function(x) as.dist((1-cor(t(x)))/2)
+```
+
+#Different color for DE analysis
+#Here, we used DE genes from the elastic net and compared the top genes from limma (blue, left). 
+#Top bar represents primary tumor samples (red) and normal samples (black).
+```{r}
+colorLimmaGenes = ifelse(
+  # Given a vector of boolean values
+  (relevant_genes %in% limma_res$topGenes$gene_id),
+  "blue", # if true, return blue for that value
+  "pink" # if false, return pink for that value
+)
+gene_heatmap = heatmap.2(
+  t(Col_mat[,relevant_genes]),
+  scale="row",          # scale the values for each gene (row)
+  density.info="none",  # turns off density plot inside color legend
+  trace="none",         # turns off trace lines inside the heat map
+  col=hmcol,            # define the color map
+  labRow=relevant_gene_names, # use gene names instead of ensembl annotation
+  RowSideColors=colorLimmaGenes,
+  labCol=FALSE,         # Not showing column labels
+  ColSideColors=as.character(as.numeric(Col_resp)), # Show colors for each response class
+  dendrogram="both",    # Show dendrograms for both axis
+  hclust = clust,       # Define hierarchical clustering method
+  distfun = dist,       # Using correlation coefficient for distance function
+  cexRow=.5,            # Resize row labels
+  margins=c(1,7)        # Define margin spaces
+)
+```
+#Hierarchical clustering
+# Extract the hierarchical cluster from heatmap to class "hclust"
+```{r}
+hc = as.hclust(gene_heatmap$rowDendrogram)
+```
+# Here, we divided the tree into 2 groups, up-regulated in Solid Tissue Normal and up-regulated in primary tumor
+```{r}
+clusters = cutree(hc, k=2)
+table(clusters)
+expr_df = limma_res$topGenes
+print(expr_df[1, ])
+```
+# get the ensembl gene id of the first row
+```{r}
+gene_id = expr_df[1, "gene_id"]
+```
+
+# also get the common gene name of the first row
+# gene_name = expr_df[1, "gene_name"]
+# gene_name
+```{r}
+clinical = coad2_data@colData
+dim(clinical)
+coad_clin_df = clinical[clinical$definition == "Solid Tissue Normal",
+                   c("patient",
+                     "vital_status",
+                     "days_to_death",
+                     "days_to_last_follow_up",
+                     "gender")]
+```
+
+# Here, we created a new boolean variable that has TRUE for dead patients and FALSE for live patients
+```{r}
+coad_clin_df$deceased = coad_clin_df$vital_status == "Dead"
+```
+
+# Here, we created an "overall survival" variable that is equal to days_to_death for dead patients, and to days_to_last_follow_up for patients who are still alive
+
+```{r}
+coad_clin_df$overall_survival = ifelse(coad_clin_df$deceased,
+                                  coad_clin_df$days_to_death,
+                                  coad_clin_df$days_to_last_follow_up)
+```
+
+# Here, we showed first 10 samples
+```{r}
+head(coad_clin_df)
+```
+
+#Here, we find the distribution of differentially expressed genes
+```{r}
+expr_normal = Col_mat[rownames(coad_clin_df), gene_id]
+expr_primary_tumor = Col_mat[setdiff(rownames(Col_mat), rownames(coad_clin_df)), gene_id]
+boxplot(expr_normal, expr_primary_tumor,names=c("Solid Tissue Normal", "Primary Tumor"), main="Distribution of gene expression", col=c("cyan", "yellow"))
+
+```
+
+# For Group 1: Upregulated in Normal tumor
+```{r}
+upregulated_N <-names(clusters[clusters %in% 1])
+gostres_N <- gost(query = relevant_gene_names, organism = "hsapiens", significant = TRUE)
+head(gostres_N$result)
+gostplot(gostres_N)
+```
+# Group 2: Upregulated genes in Primary tumor
+```{r}
+upregulated_P<-names(clusters[clusters %in% 2])
+gostres_P <- gost(query = relevant_gene_names, organism = "hsapiens")
+head(gostres_P$result)
+gostplot(gostres_P)
+```
+#Here we performed survival analysis
+# remove any of the letters "a", "b" or "c", but only if they are at the end
+# of the name, eg "stage iiia" would become simply "stage iii"
+# we remove those with stage "not reported", since they are unknown
+```{r}
+Surv(coad2_df$overall_survival, coad2_df$deceased)
+Surv(coad2_df$overall_survival, coad2_df$deceased) ~ coad2_df$gender
+fit = survfit(Surv(overall_survival, deceased) ~ paper_tumor_stage, data=coad2_df)
+print(fit)
+coad2_df$paper_tumor_stage = gsub("[ABC]$", "", coad2_df$paper_tumor_stage)
+coad2_df[which(coad2_df$paper_tumor_stage == "not reported"), "tumor_stage"] = NA
+coad2_df[which(coad2_df$paper_tumor_stage == "Stage I"), "paper_tumor_stage"] = NA
+table(coad2_df$paper_tumor_stage)
+fit = survfit(Surv(overall_survival, deceased) ~ paper_tumor_stage, data=coad2_df)
+pval = surv_pvalue(fit, data=coad2_df)$pval
+print(pval)
+coad2_df$gene_value = Col_mat[rownames(coad2_df), gene_id]
+median_value = median(coad2_df$gene_value)
+print(median_value)
+```
+
+# divide patients in two groups, up and down regulated.
+# if the patient expression is greater or equal to them median we put it
+# among the "up-regulated", otherwise among the "down-regulated"
+# So here we check the expression of gene and also it influences on prognosis, so here we took all the expression values in the diseased samples, then took the median of them.
+# So here the patients with expression greater than the median we add these in the up-regulated groups, whereas the others in the down-regulated group.
+```{r}
+coad2_df$gene = ifelse(coad2_df$gene_value >= median_value, "UP", "DOWN")
+fit = survfit(Surv(overall_survival, deceased) ~ gene, data=coad2_df)
+pval = surv_pvalue(fit, data=coad2_df)$pval
+print(pval)
+ggsurvplot(fit, data=coad2_df, pval=T, risk.table=T, title=paste(gene_name))
+```
+
+#Here this plot role of top gene in prognosis of COAD cancer.
+#CA7 gene does not appear to make a difference for prognosis.
+# Final Point:
+In this project, we used supervised machine learning models to differentiate the normal samples and primary tumor samples using TCGA-COAD through gene expression profiling. And we observed that, the accuracy of all the used models was 100% except Navies Bayes. 
